@@ -8,7 +8,7 @@ namespace mxnet
 {
 namespace op
 {
-__global__ void unrolled(const float * input, float * output, const int B, const int M, const int C, const int H, const int W, const int K){
+__global__ void unroll(const float * input, float * output, const int B, const int M, const int C, const int H, const int W, const int K){
    int tx = blockIdx.x * blockDim.x + threadIdx.x;
    int tb = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -66,13 +66,13 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
 // i3:batch number  i2:channel number  i1:row number  i0:col row
 #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
 
-#define y3d(i2, i1, i0) y4d(i2, i1, ((i0)/K), ((i0)%K))
+//#define y3d(i2, i1, i0) y4d(i2, i1, ((i0)/K), ((i0)%K))
 // i2:batch number  i1:unroalled row number  i0:unrolled col number(filer #)
 #define x3d(i2, i1, i0) x[(i2) * ( UNROLLWIDTH * (C * K * K) ) + (i1) *(UNROLLWIDTH) + (i0)]
 // i3:feature number  12:channel number  i1:row number  i0:col number
 #define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
 // i2:feature number  11:channel number  i0:element # in filter
-#define k3d(i2, i1, i0) k4d(i2, i1, ((i0)/(K*K)), ((i0)%(K*K)))
+//#define k3d(i2, i1, i0) k4d(i2, i1, ((i0)/(K*K)), ((i0)%(K*K)))
 
   int Row = blockIdx.y * blockDim.y + threadIdx.y ;
   int Col = blockIdx.x * blockDim.x + threadIdx.x ;
@@ -90,20 +90,20 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
 
 
       //value = value + A[Row *numAColumns + k] *B[k*numBColumns +Col] ;
-      value = value + (k3d(tb,Row,k)) * (x3d(tb,k,Col)) ;
+      value = value + (k4d(tb,Row,(k/(K*K)),(k%(K*K)))) * (x3d(tb,k,Col)) ;
 
 
     }
       //C[Row*numCColumns +Col] = value ;
-      y3d(tb, Row, Col) = value;
+      y4d(tb, Row, (Col/K), (Col%K)) = value;
   }
 
 
 #undef y4d
-#undef y3d
+//#undef y3d
 #undef x3d
 #undef k4d
-#undef k3d
+//#undef k3d
 }
 
 /*
@@ -141,7 +141,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     int numbatchs = ceil(B*(1.0)/NUM_BATCH);
     dim3 ugridDim(numblocks,numbatchs,1);
     dim3 ublockDim(NUM_THREADS,NUM_BATCH,1);
-    unrolled<<<ugridDim,ublockDim>>>(x.dptr_, unrolled,B,M,C,H,W,K);
+    unroll<<<ugridDim,ublockDim>>>(x.dptr_,unrolled,B,M,C,H,W,K);
     // Extract the tensor dimensions into B,M,C,H,W,K
     // ...
 
