@@ -8,6 +8,18 @@ namespace mxnet
 {
 namespace op
 {
+__global__ void unrolled(const float * input, float * output, const int B, const int M, const int C, const int H, const int W, const int K){
+   int tx = blockIdx.x * blockDim.x + threadIdx.x;
+   int tb = blockIdx.y * blockDim.y + threadIdx.y;
+
+   int H_out = H - K + 1;
+   int W_out = W - K + 1;
+   int W_unroll = H_out * W_out;
+
+   if (tx < C * W_unroll ) {
+     /* code */
+   }
+}
 
 __global__ void forward_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
 {
@@ -43,7 +55,7 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
    Any code you write should be executed by this function.
    For ECE408, we only expect the float version of the operator to be called, so here we specialize with only floats.
 */
-template <typename gpu, typename float>
+template <typename gpu>
 void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tensor<gpu, 4, float> &x, const mshadow::Tensor<gpu, 4, float> &w)
 {
 
@@ -55,17 +67,35 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     const int H = x.shape_[2];
     const int W = x.shape_[3];
     const int K = w.shape_[3];
+    int NUM_THREADS = 128;
+    int NUM_BATCH = 8;
     int TILE_WIDTH = 16;
+    int size = sizeof(float) * C * (H-K+1) * (W- K + 1) * K * K * B;
+    float * unrolled;
+    cudaMalloc((void **), &unrolled, size );
+    int H_out = H-K+1;
+    int W_out = W-K+1;
+    int numthreads =  C * H_out * W_out;
+    int numblocks = ceil(numthreads*(1.0)/NUM_THREADS);
+    int numbatchs = ceil(B*(1.0)/NUM_BATCH);
+    dim3 ugridDim(numblocks,numbatchs,1);
+    dim3 ublockDim(NUM_THREADS,NUM_BATCH,1);
+    unrolled<<<ugridDim,ublockDim>>>(x.dptr_, unrolled,B,M,C,H,W,K);
     // Extract the tensor dimensions into B,M,C,H,W,K
     // ...
 
     // Set the kernel dimensions
-   dim3 gridDim(0);
-   dim3 blockDim(0);
+    int H_grid = ceil(H/16.0);
+    int W_grid = ceil(W/16.0);
 
+
+    int Z = H_grid * W_grid;
+    dim3 gridDim(,M,Z);
+    dim3 blockDim(TILE_WIDTH, TILE_WIDTH, TILE_WIDTH);
+    int s = sizeof(float) * ((TILE_WIDTH + K-1)*(TILE_WIDTH + K-1) + K*K );
     // Call the kernel
-    forward_kernel<<<gridDim, blockDim, 0, s>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K);
-
+    forward_kernel<<<gridDim, blockDim, 0, s>>>(y.dptr_,unrolled,w.dptr_, B,M,C,H,W,K);
+    cudaFree(unrolled);
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());
 
