@@ -64,13 +64,13 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
 // float a = y4d(0,0,0,0)
 // y4d(0,0,0,0) = a
 // i3:batch number  i2:channel number  i1:row number  i0:col row
-#define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
+#define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + (i0)]
 
 //#define y3d(i2, i1, i0) y4d(i2, i1, ((i0)/K), ((i0)%K))
 // i2:batch number  i1:unroalled row number  i0:unrolled col number(filer #)
 #define x3d(i2, i1, i0) x[(i2) * ( UNROLLWIDTH * (C * K * K) ) + (i1) *(UNROLLWIDTH) + (i0)]
 // i3:feature number  12:channel number  i1:row number  i0:col number
-#define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+#define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + (i0)]
 // i2:feature number  11:channel number  i0:element # in filter
 //#define k3d(i2, i1, i0) k4d(i2, i1, ((i0)/(K*K)), ((i0)%(K*K)))
 
