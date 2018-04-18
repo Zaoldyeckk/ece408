@@ -83,14 +83,14 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
   int numARows = M;
   int numBColumns = UNROLLWIDTH;
   int numAColumns = K * K * C;
-  int numCColumns = UNROLLWIDTH;
 
   if  ( (Row < numARows) && (Col < numBColumns) ){
     float value = 0;
     for( int k = 0 ; k < numAColumns ; k++){
 
+
       //value = value + A[Row *numAColumns + k] *B[k*numBColumns +Col] ;
-      value = value + k3d(tb,Row,k) * x3d(tb,k,col) ;
+      value = value + k3d(tb,Row,k) * x3d(tb,k,Col) ;
 
 
     }
@@ -100,6 +100,7 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
 
 
 #undef y4d
+#undef y3d
 #undef x3d
 #undef k4d
 #undef k3d
@@ -110,7 +111,7 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
    Any code you write should be executed by this function.
    For ECE408, we only expect the float version of the operator to be called, so here we specialize with only floats.
 */
-template <typename gpu>
+template <>
 void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tensor<gpu, 4, float> &x, const mshadow::Tensor<gpu, 4, float> &w)
 {
 
