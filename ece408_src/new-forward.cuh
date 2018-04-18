@@ -12,13 +12,38 @@ __global__ void unrolled(const float * input, float * output, const int B, const
    int tx = blockIdx.x * blockDim.x + threadIdx.x;
    int tb = blockIdx.y * blockDim.y + threadIdx.y;
 
+   int c,s,h_out,w_out,unroll_w,unroll_h,w_base;
+
    int H_out = H - K + 1;
    int W_out = W - K + 1;
-   int W_unroll = H_out * W_out;
+   int UNROLLWIDTH = H_out * W_out;  // total
 
-   if (tx < C * W_unroll ) {
-     /* code */
+   // if tb is valid
+   if (tb >= B){
+     return ;
    }
+   // i3:batch number  i2:channel number  i1:fiter row number i0:filter col number
+   #define input4d(i3, i2, i1, i0) input[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
+   // i2:batch number  i1:unroalled row number  i0:unrolled col number(filer #)
+   #define output3d(i2, i1, i0) output[(i2) * ( UNROLLWIDTH * (C * K * K) ) + (i1) *(UNROLLWIDTH) + (i0)]
+
+   if (tx < C * UNROLLWIDTH ) {
+     c = tx/UNROLLWIDTH;
+     s = tx%UNROLLWIDTH;
+
+     h_out = s/W_out;
+     w_out = s%W_out;
+     unroll_w = h_out * W_out + w_out;
+     w_base = c * K * K; // row base number
+     for(int p = 0; p < K; p++) {
+      for(int q = 0; q < K; q++) {
+        unroll_h = w_base + (p * K + q);
+        output3d(tb,unroll_h,unroll_w) = input4d(tb, c, (h_out + p), (w_out + q));
+       }
+      }
+   }
+   #undef output3d
+   #undef input4d
 }
 
 __global__ void forward_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
@@ -33,21 +58,51 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
 
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
-    (void)H_out; // silence declared but never referenced warning. remove this line when you start working
-    (void)W_out; // silence declared but never referenced warning. remove this line when you start working
+    const int UNROLLWIDTH = H_out * W_out;
 
 // An example use of these macros:
 // float a = y4d(0,0,0,0)
 // y4d(0,0,0,0) = a
+// i3:batch number  i2:channel number  i1:row number  i0:col row
 #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
-#define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
-#define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
 
+#define y3d(i2, i1, i0) y4d(i2, i1, (i0/K), (i0%K))
+// i2:batch number  i1:unroalled row number  i0:unrolled col number(filer #)
+#define x3d(i2, i1, i0) x[(i2) * ( UNROLLWIDTH * (C * K * K) ) + (i1) *(UNROLLWIDTH) + (i0)]
+// i3:feature number  12:channel number  i1:row number  i0:col number
+#define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+// i2:feature number  11:channel number  i0:element # in filter
+#define k3d(i2, i1, i0) k4d(i2, i1, (i0/(K*K)), (i0%(K*K)))
+
+  int Row = blockIdx.y * blockDim.y + threadIdx.y ;
+  int Col = blockIdx.x * blockDim.x + threadIdx.x ;
+  int tb = blockIdx.z * blockDim.z + threadIdx.z ;
+  if (tb >= B){
+    return ;
+  }
+  int numARows = M;
+  int numBColumns = UNROLLWIDTH;
+  int numAColumns = K * K * C;
+  int numCColumns = UNROLLWIDTH;
+
+  if  ( (Row < numARows) && (Col < numBColumns) ){
+    float value = 0;
+    for( int k = 0 ; k < numAColumns ; k++){
+
+      //value = value + A[Row *numAColumns + k] *B[k*numBColumns +Col] ;
+      value = value + k3d(tb,Row,k) * x3d(tb,k,col) ;
+
+
+    }
+      //C[Row*numCColumns +Col] = value ;
+      y3d(tb, Row, Col) = value;
+  }
 
 
 #undef y4d
-#undef x4d
+#undef x3d
 #undef k4d
+#undef k3d
 }
 
 /*
@@ -67,10 +122,15 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     const int H = x.shape_[2];
     const int W = x.shape_[3];
     const int K = w.shape_[3];
+    const int H_out = H - K + 1;
+    const int W_out = W - K + 1;
+    const int UNROLLWIDTH = H_out * W_out;
+
     int NUM_THREADS = 128;
     int NUM_BATCH = 8;
+    int NUM_BATCH_ = 4;
     int TILE_WIDTH = 16;
-    int size = sizeof(float) * C * (H-K+1) * (W- K + 1) * K * K * B;
+    int size = sizeof(float) * C * UNROLLWIDTH * K * K * B;
     float * unrolled;
     cudaMalloc((void **), &unrolled, size );
     int H_out = H-K+1;
@@ -85,16 +145,14 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     // ...
 
     // Set the kernel dimensions
-    int H_grid = ceil(H/16.0);
-    int W_grid = ceil(W/16.0);
-
-
-    int Z = H_grid * W_grid;
-    dim3 gridDim(,M,Z);
-    dim3 blockDim(TILE_WIDTH, TILE_WIDTH, TILE_WIDTH);
-    int s = sizeof(float) * ((TILE_WIDTH + K-1)*(TILE_WIDTH + K-1) + K*K );
+    int H_grid = ceil(M*1.0/16.0);
+    int W_grid = ceil(UNROLLWIDTH*1.0/16.0);
+    int B_grid = ceil(B*1.0/NUM_BATCH_);
+    dim3 gridDim(W_grid,H_grid,B_grid);
+    dim3 blockDim(TILE_WIDTH, TILE_WIDTH, NUM_BATCH_);
+    // int s = sizeof(float) * ((TILE_WIDTH + K-1)*(TILE_WIDTH + K-1) + K*K );
     // Call the kernel
-    forward_kernel<<<gridDim, blockDim, 0, s>>>(y.dptr_,unrolled,w.dptr_, B,M,C,H,W,K);
+    forward_kernel<<<gridDim, blockDim>>>(y.dptr_,unrolled,w.dptr_, B,M,C,H,W,K);
     cudaFree(unrolled);
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());
