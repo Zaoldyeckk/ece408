@@ -133,7 +133,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     int TILE_WIDTH = 16;
     int size = sizeof(float) * C * UNROLLWIDTH * K * K * B;
     float * unrolled;
-    cudaMalloc((void **) &unrolled, size );
+    MSHADOW_CUDA_CALL(cudaMalloc((void **) &unrolled, size ));
     // int H_out = H-K+1;
     // int W_out = W-K+1;
     int numthreads =  C * H_out * W_out;
@@ -154,10 +154,10 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     // int s = sizeof(float) * ((TILE_WIDTH + K-1)*(TILE_WIDTH + K-1) + K*K );
     // Call the kernel
     forward_kernel<<<gridDim, blockDim>>>(y.dptr_,unrolled,w.dptr_, B,M,C,H,W,K);
-    cudaFree(unrolled);
+
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());
-
+    MSHADOW_CUDA_CALL(cudaFree(unrolled));
 }
 
 /*
