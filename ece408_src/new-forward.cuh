@@ -133,7 +133,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     int TILE_WIDTH = 16;
     int size = sizeof(float) * C * UNROLLWIDTH * K * K * B;
     float * unrolled;
-    MSHADOW_CUDA_CALL(cudaMalloc((void **) &unrolled, size ));
+    MSHADOW_CUDA_CALL(cudaMalloc((void **) &unrolled, size));
     // int H_out = H-K+1;
     // int W_out = W-K+1;
     int numthreads =  C * H_out * W_out;
