@@ -19,15 +19,13 @@ __global__ void unroll(const float * input, float * output, const int B, const i
    int UNROLLWIDTH = H_out * W_out;  // total
 
    // if tb is valid
-   if (tb >= B){
-     return ;
-   }
+
    // i3:batch number  i2:channel number  i1:fiter row number i0:filter col number
    #define input4d(i3, i2, i1, i0) input[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
    // i2:batch number  i1:unroalled row number  i0:unrolled col number(filer #)
    #define output3d(i2, i1, i0) output[(i2) * ( UNROLLWIDTH * (C * K * K) ) + (i1) *(UNROLLWIDTH) + (i0)]
 
-   if (tx < C * UNROLLWIDTH ) {
+   if ((tx < C * UNROLLWIDTH ) && (tb < B)) {
      c = tx/UNROLLWIDTH;
      s = tx%UNROLLWIDTH;
 
@@ -38,7 +36,8 @@ __global__ void unroll(const float * input, float * output, const int B, const i
      for(int p = 0; p < K; p++) {
       for(int q = 0; q < K; q++) {
         unroll_h = w_base + (p * K + q);
-        output3d(tb,unroll_h,unroll_w) = input4d(tb, c, (h_out + p), (w_out + q));
+        // output3d(tb,unroll_h,unroll_w) = input4d(tb, c, (h_out + p), (w_out + q));
+        output[(tb) * ( UNROLLWIDTH * (C * K * K) ) + (unroll_h) *(UNROLLWIDTH) + (unroll_w)] = input[(tb) * (C * H * W) + (c) * (H * W) + (h_out + p) * (W) + (w_out + q)];
        }
       }
    }
@@ -77,25 +76,24 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
   int Row = blockIdx.y * blockDim.y + threadIdx.y ;
   int Col = blockIdx.x * blockDim.x + threadIdx.x ;
   int tb = blockIdx.z * blockDim.z + threadIdx.z ;
-  if (tb >= B){
-    return ;
-  }
+
   int numARows = M;
   int numBColumns = UNROLLWIDTH;
   int numAColumns = K * K * C;
 
-  if  ( (Row < numARows) && (Col < numBColumns) ){
+  if  ( (Row < numARows) && (Col < numBColumns) && (tb < B)){
     float value = 0;
     for( int j = 0 ; j < numAColumns ; j++){
 
 
       //value = value + A[Row *numAColumns + k] *B[k*numBColumns +Col] ;
-      value = value + (k4d(tb,Row,(j/(K*K)),(j%(K*K)))) * (x3d(tb,j,Col)) ;
-
+      //value = value + (k4d(Row,j/(K*K),(j%(K*K)/K),(j%(K*K)%K))) * (x3d(tb,j,Col)) ;
+      value = value + (k[Row *numAColumns + j]) * (x[(tb) * ( UNROLLWIDTH * (C * K * K) ) + (j) *(UNROLLWIDTH) + (Col)]) ;
 
     }
       //C[Row*numCColumns +Col] = value ;
-      y4d(tb, Row, (Col/K), (Col%K)) = value;
+      // y4d(tb, Row, (Col/K), (Col%K)) = value;
+      y[(tb) * (M * UNROLLWIDTH) + Row*UNROLLWIDTH + Col] = value;
   }
 
 
@@ -137,8 +135,8 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     // int H_out = H-K+1;
     // int W_out = W-K+1;
     int numthreads =  C * H_out * W_out;
-    int numblocks = ceil(numthreads*(1.0)/NUM_THREADS);
-    int numbatchs = ceil(B*(1.0)/NUM_BATCH);
+    int numblocks = ceil(numthreads*1.0/NUM_THREADS);
+    int numbatchs = ceil(B*1.0/NUM_BATCH);
     dim3 ugridDim(numblocks,numbatchs,1);
     dim3 ublockDim(NUM_THREADS,NUM_BATCH,1);
     unroll<<<ugridDim,ublockDim>>>(x.dptr_,unrolled,B,M,C,H,W,K);
@@ -149,8 +147,8 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     int H_grid = ceil(M*1.0/16.0);
     int W_grid = ceil(UNROLLWIDTH*1.0/16.0);
     int B_grid = ceil(B*1.0/NUM_BATCH_);
-    dim3 gridDim(W_grid,H_grid,B_grid);
-    dim3 blockDim(TILE_WIDTH, TILE_WIDTH, NUM_BATCH_);
+    dim3 gridDim(W_grid,H_grid,B);
+    dim3 blockDim(TILE_WIDTH, TILE_WIDTH, 1);
     // int s = sizeof(float) * ((TILE_WIDTH + K-1)*(TILE_WIDTH + K-1) + K*K );
     // Call the kernel
     forward_kernel<<<gridDim, blockDim>>>(y.dptr_,unrolled,w.dptr_, B,M,C,H,W,K);
