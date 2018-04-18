@@ -86,11 +86,11 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
 
   if  ( (Row < numARows) && (Col < numBColumns) ){
     float value = 0;
-    for( int k = 0 ; k < numAColumns ; k++){
+    for( int j = 0 ; j < numAColumns ; j++){
 
 
       //value = value + A[Row *numAColumns + k] *B[k*numBColumns +Col] ;
-      value = value + (k4d(tb,Row,(k/(K*K)),(k%(K*K)))) * (x3d(tb,k,Col)) ;
+      value = value + (k4d(tb,Row,(j/(K*K)),(j%(K*K)))) * (x3d(tb,j,Col)) ;
 
 
     }
