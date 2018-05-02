@@ -48,12 +48,6 @@ __global__ void unroll(const float * input, float * output, const int B, const i
 __global__ void forward_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
 {
 
-    /*
-    Modify this function to implement the forward pass described in Chapter 16.
-    We have added an additional dimension to the tensors to support an entire mini-batch
-    The goal here is to be correct AND fast.
-    We have some nice #defs for you below to simplify indexing. Feel free to use them, or create your own.
-    */
 
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
@@ -85,7 +79,6 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
     float value = 0;
     for( int j = 0 ; j < numAColumns ; j++){
 
-
       //value = value + A[Row *numAColumns + k] *B[k*numBColumns +Col] ;
       //value = value + (k4d(Row,j/(K*K),(j%(K*K)/K),(j%(K*K)%K))) * (x3d(tb,j,Col)) ;
       value = value + (k[Row *numAColumns + j]) * (x[(tb) * ( UNROLLWIDTH * (C * K * K) ) + (j) *(UNROLLWIDTH) + (Col)]) ;
@@ -103,6 +96,49 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
 //#undef k4d
 //#undef k3d
 }
+__global__ void shared_forward_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
+{
+  __shared__ float TM[16][16];
+  __shared__ float TN[16][16];
+  const int UNROLLWIDTH = (H - K + 1) * (W - K + 1);
+
+  int Row = blockIdx.y * blockDim.y + threadIdx.y ;
+  int Col = blockIdx.x * blockDim.x + threadIdx.x ;
+  int tb = blockIdx.z * blockDim.z + threadIdx.z ;
+
+  int numARows = M;
+  int numBColumns = UNROLLWIDTH;
+  int numAColumns = K * K * C;
+
+
+  float PValue = 0;
+  if (tb < B) {
+    for( int i = 0; i< ceil(numAColumns/16.0); i++){
+        if((Row < numARows) && ((i*16 + threadIdx.x) < numAColumns ) ) {
+          TM[threadIdx.y][threadIdx.x] = k[Row * numAColumns+ i *16 +threadIdx.x];
+        }
+        else{
+          TM[threadIdx.y][threadIdx.x] = 0;
+        }
+
+        if(( (i*16+threadIdx.y) < numAColumns )  && (Col < numBColumns) ){
+          TN[threadIdx.y][threadIdx.x] = x[(tb) * ( UNROLLWIDTH * (C * K * K) ) + (i*16+threadIdx.y) * numBColumns + Col];
+        }
+        else{
+         TN[threadIdx.y][threadIdx.x] = 0 ;
+        }
+       __syncthreads();
+       for(int kk = 0; kk <16 ; kk++){
+          PValue = PValue + TM[threadIdx.y][kk] * TN[kk][threadIdx.x];
+       }
+       __syncthreads();
+       }
+    if((Row < numARows) && (Col<numBColumns)){
+     y[(tb) * (M * UNROLLWIDTH) + Row*numBColumns + Col] = PValue;
+    }
+  }
+}
+
 
 /*
    This function is called by new-inl.h
@@ -127,7 +163,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
 
     int NUM_THREADS = 32;
     int NUM_BATCH = 8;
-    int NUM_BATCH_ = 4;
+    int NUM_BATCH_ = 1;
     int TILE_WIDTH = 16;
     size_t size = sizeof(float) * C * UNROLLWIDTH * K * K * B;
     float * unrolled;
@@ -149,9 +185,11 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     int B_grid = ceil(B*1.0/NUM_BATCH_);
     dim3 gridDim(W_grid,H_grid,B_grid);
     dim3 blockDim(TILE_WIDTH, TILE_WIDTH, NUM_BATCH_);
+
     // int s = sizeof(float) * ((TILE_WIDTH + K-1)*(TILE_WIDTH + K-1) + K*K );
     // Call the kernel
-    forward_kernel<<<gridDim, blockDim>>>(y.dptr_,unrolled,w.dptr_, B,M,C,H,W,K);
+    //forward_kernel<<<gridDim, blockDim>>>(y.dptr_,unrolled,w.dptr_, B,M,C,H,W,K);
+    shared_forward_kernel<<<gridDim, blockDim>>>(y.dptr_,unrolled,w.dptr_, B,M,C,H,W,K);
 
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());
