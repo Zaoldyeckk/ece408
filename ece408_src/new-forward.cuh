@@ -33,6 +33,7 @@ __global__ void unroll(const float * input, float * output, const int B, const i
      w_out = s%W_out;
      unroll_w = h_out * W_out + w_out;
      w_base = c * K * K; // row base number
+
      for(int p = 0; p < K; p++) {
       for(int q = 0; q < K; q++) {
         unroll_h = w_base + (p * K + q);
@@ -77,6 +78,7 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
 
   if  ( (Row < numARows) && (Col < numBColumns) && (tb < B)){
     float value = 0;
+
     for( int j = 0 ; j < numAColumns ; j++){
 
       //value = value + A[Row *numAColumns + k] *B[k*numBColumns +Col] ;
@@ -139,6 +141,80 @@ __global__ void shared_forward_kernel(float *y, const float *x, const float *k, 
   }
 }
 
+__global__ void fuse_forward_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
+{
+  __shared__ float TM[16][16];
+  __shared__ float TN[16][16];
+  const int UNROLLWIDTH = (H - K + 1) * (W - K + 1);
+
+  int Row = blockIdx.y * blockDim.y + threadIdx.y ;
+  int Col = blockIdx.x * blockDim.x + threadIdx.x ;
+  int tb = blockIdx.z * blockDim.z + threadIdx.z ;
+
+  int numARows = M;
+  int numBColumns = UNROLLWIDTH;
+  int numAColumns = K * K * C;
+
+
+  float PValue = 0;
+  if (tb < B) {
+    for( int i = 0; i< ceil(numAColumns/16.0); i++){
+        if((Row < numARows) && ((i*16 + threadIdx.x) < numAColumns ) ) {
+          TM[threadIdx.y][threadIdx.x] = k[Row * numAColumns+ i *16 +threadIdx.x];
+        }
+        else{
+          TM[threadIdx.y][threadIdx.x] = 0;
+        }
+
+        // try to coalease
+        /*
+        if(( (i*16+threadIdx.x) < numAColumns )  && (blockIdx.x*blockDim.x+threadIdx.y < numBColumns) ){
+          // row::threadIdx.x   col::threadIdx.y
+          TN[threadIdx.x][threadIdx.y] = x[(tb) * (C * H * W) + \
+          ((i*16+threadIdx.x)/(K*K)) * (H * W) + \
+          (((i*16+threadIdx.x)%(K*K)/K)+((blockIdx.x*blockDim.x+threadIdx.y)/(W-K+1)))*(W) + \
+          (((i*16+threadIdx.x)%K)+((blockIdx.x*blockDim.x+threadIdx.y)%(W-K+1)))];
+
+          // unrolled index:: row: (i*16+threadIdx.x)  col: b_x*dim+t_y
+          // before unrolled index format :: [(tb) * (C * H * W) + (c) * (H * W) + (h_out + p) * (W) + (w_out + q)]
+
+          // TN[threadIdx.y][threadIdx.x] = x[(tb) * ( UNROLLWIDTH * (C * K * K) ) + (i*16+threadIdx.y) * numBColumns + Col];
+        }
+        else{
+         TN[threadIdx.x][threadIdx.y] = 0 ;
+        }
+        */
+        // non-coaleasing
+
+        if(( (i*16+threadIdx.y) < numAColumns )  && (Col < numBColumns) ){
+          // row::threadIdx.x   col::threadIdx.y
+          TN[threadIdx.y][threadIdx.x] = x[(tb) * (C * H * W) + \
+          ((i*16+threadIdx.y)/(K*K)) * (H * W) + \
+          ((((i*16+threadIdx.y)%(K*K))/K)+(Col/(W-K+1)))*(W) + \
+          (((i*16+threadIdx.y)%K)+(Col%(W-K+1)))];
+
+          // unrolled index:: row: (i*16+threadIdx.x)  col: b_x*dim+t_y
+          // before unrolled index format :: [(tb) * (C * H * W) + (c) * (H * W) + (h_out + p) * (W) + (w_out + q)]
+
+          // TN[threadIdx.y][threadIdx.x] = x[(tb) * ( UNROLLWIDTH * (C * K * K) ) + (i*16+threadIdx.y) * numBColumns + Col];
+        }
+        else{
+         TN[threadIdx.y][threadIdx.x] = 0 ;
+        }
+        
+
+       __syncthreads();
+       for(int kk = 0; kk <16 ; kk++){
+          PValue = PValue + TM[threadIdx.y][kk] * TN[kk][threadIdx.x];
+       }
+       __syncthreads();
+       }
+    if((Row < numARows) && (Col<numBColumns)){
+     y[(tb) * (M * UNROLLWIDTH) + Row*numBColumns + Col] = PValue;
+    }
+  }
+}
+
 
 /*
    This function is called by new-inl.h
@@ -161,13 +237,13 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     const int W_out = W - K + 1;
     const int UNROLLWIDTH = H_out * W_out;
 
-    int NUM_THREADS = 32;
-    int NUM_BATCH = 8;
+    int NUM_THREADS = 16;
+    int NUM_BATCH = 16;
     int NUM_BATCH_ = 1;
     int TILE_WIDTH = 16;
-    size_t size = sizeof(float) * C * UNROLLWIDTH * K * K * B;
-    float * unrolled;
-    MSHADOW_CUDA_CALL(cudaMalloc((void **) &unrolled, size));
+    // size_t size = sizeof(float) * C * UNROLLWIDTH * K * K * B;
+    // float * unrolled;
+    // MSHADOW_CUDA_CALL(cudaMalloc((void **) &unrolled, size));
     // int H_out = H-K+1;
     // int W_out = W-K+1;
     int numthreads =  C * H_out * W_out;
@@ -175,10 +251,9 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     int numbatchs = ceil(B*1.0/NUM_BATCH);
     dim3 ugridDim(numblocks,numbatchs,1);
     dim3 ublockDim(NUM_THREADS,NUM_BATCH,1);
-    unroll<<<ugridDim,ublockDim>>>(x.dptr_,unrolled,B,M,C,H,W,K);
+    // unroll<<<ugridDim,ublockDim>>>(x.dptr_,unrolled,B,M,C,H,W,K);
     // Extract the tensor dimensions into B,M,C,H,W,K
     // ...
-
     // Set the kernel dimensions
     int H_grid = ceil(M*1.0/16.0);
     int W_grid = ceil(UNROLLWIDTH*1.0/16.0);
@@ -189,11 +264,12 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     // int s = sizeof(float) * ((TILE_WIDTH + K-1)*(TILE_WIDTH + K-1) + K*K );
     // Call the kernel
     //forward_kernel<<<gridDim, blockDim>>>(y.dptr_,unrolled,w.dptr_, B,M,C,H,W,K);
-    shared_forward_kernel<<<gridDim, blockDim>>>(y.dptr_,unrolled,w.dptr_, B,M,C,H,W,K);
+    // shared_forward_kernel<<<gridDim, blockDim>>>(y.dptr_,unrolled,w.dptr_, B,M,C,H,W,K);
+    fuse_forward_kernel<<<gridDim, blockDim>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K);
 
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());
-    MSHADOW_CUDA_CALL(cudaFree(unrolled));
+    // MSHADOW_CUDA_CALL(cudaFree(unrolled));
 }
 
 /*
