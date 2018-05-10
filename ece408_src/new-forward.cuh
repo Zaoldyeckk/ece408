@@ -148,6 +148,7 @@ namespace op
 
 __global__ void fuse_forward_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
 {
+
   __shared__ float TM[16][16];
   __shared__ float TN[16][16];
   const int UNROLLWIDTH = (H - K + 1) * (W - K + 1);
@@ -236,6 +237,12 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     int NUM_BATCH = 16;
     int NUM_BATCH_ = 1;
     int TILE_WIDTH = 16;
+    // if (H == 30) {
+    //   TILE_WIDTH = 30;
+    // }
+    //  if (H == 64) {
+    //   TILE_WIDTH = 32;
+    // }
     // size_t size = sizeof(float) * C * UNROLLWIDTH * K * K * B;
     // float * unrolled;
     // MSHADOW_CUDA_CALL(cudaMalloc((void **) &unrolled, size));
@@ -250,11 +257,18 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     // Extract the tensor dimensions into B,M,C,H,W,K
     // ...
     // Set the kernel dimensions
-    int H_grid = ceil(M*1.0/16.0);
-    int W_grid = ceil(UNROLLWIDTH*1.0/16.0);
+    int H_grid = ceil(M*1.0/float(TILE_WIDTH));
+    int W_grid = ceil(UNROLLWIDTH*1.0/float(TILE_WIDTH));
     int B_grid = ceil(B*1.0/NUM_BATCH_);
     dim3 gridDim(W_grid,H_grid,B_grid);
     dim3 blockDim(TILE_WIDTH, TILE_WIDTH, NUM_BATCH_);
+
+    printf("B:%d\n", B);
+    printf("M:%d\n", M);
+    printf("C:%d\n", C);
+    printf("H:%d\n", H);
+    printf("W:%d\n", W);
+    printf("K:%d\n", K);
 
     // int s = sizeof(float) * ((TILE_WIDTH + K-1)*(TILE_WIDTH + K-1) + K*K );
     // Call the kernel
