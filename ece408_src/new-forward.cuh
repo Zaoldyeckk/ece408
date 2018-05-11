@@ -3,6 +3,7 @@
 #define MXNET_OPERATOR_NEW_FORWARD_CUH_
 
 #include <mxnet/base.h>
+#define TILE_WIDTH 16
 
 namespace mxnet
 {
@@ -146,71 +147,121 @@ namespace op
 // }
 
 
-__global__ void fuse_forward_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
+// __global__ void fuse_forward_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
+// {
+//
+//   __shared__ float TM[16][16];
+//   __shared__ float TN[16][16];
+//   const int UNROLLWIDTH = (H - K + 1) * (W - K + 1);
+//
+//   int Row = blockIdx.y * blockDim.y + threadIdx.y ;
+//   int Col = blockIdx.x * blockDim.x + threadIdx.x ;
+//   int tb = blockIdx.z * blockDim.z + threadIdx.z ;
+//
+//   int numARows = M;
+//   int numBColumns = UNROLLWIDTH;
+//   int numAColumns = K * K * C;
+//
+//   #define x4d(tb, i, Col, y) x[(tb) * (C * H * W) + \
+//                                   ((i*16+y)/(K*K)) * (H * W) + \
+//                                   ((((i*16+y)%(K*K))/K)+(Col/(W-K+1)))*(W) + \
+//                                   (((i*16+y)%K)+(Col%(W-K+1)))]
+//   #define filter3d(Row,i,x) k[Row * numAColumns+ i *16 +x]
+//   #define y3d(tb,Row,Col)  y[(tb) * (M * UNROLLWIDTH) + Row*numBColumns + Col]
+//
+//   float PValue = 0;
+//   if (tb < B) {
+//     for( int i = 0; i< ceil(numAColumns/16.0); i++)
+//     {
+//         if((Row < numARows) && ((i*16 + threadIdx.x) < numAColumns ) ) {
+//           TM[threadIdx.y][threadIdx.x] = filter3d(Row,i,threadIdx.x);
+//         }
+//         else{
+//           TM[threadIdx.y][threadIdx.x] = 0;
+//         }
+//
+//         if(( (i*16+threadIdx.y) < numAColumns )  && (Col < numBColumns) ){
+//           // row::threadIdx.x   col::threadIdx.y
+//           TN[threadIdx.y][threadIdx.x] = x4d(tb,i,Col,threadIdx.y);
+//         }
+//         else{
+//          TN[threadIdx.y][threadIdx.x] = 0 ;
+//         }
+//
+//        __syncthreads();
+//
+//           PValue = PValue + TM[threadIdx.y][0] * TN[0][threadIdx.x];
+//           PValue = PValue + TM[threadIdx.y][1] * TN[1][threadIdx.x];
+//           PValue = PValue + TM[threadIdx.y][2] * TN[2][threadIdx.x];
+//           PValue = PValue + TM[threadIdx.y][3] * TN[3][threadIdx.x];
+//           PValue = PValue + TM[threadIdx.y][4] * TN[4][threadIdx.x];
+//           PValue = PValue + TM[threadIdx.y][5] * TN[5][threadIdx.x];
+//           PValue = PValue + TM[threadIdx.y][6] * TN[6][threadIdx.x];
+//           PValue = PValue + TM[threadIdx.y][7] * TN[7][threadIdx.x];
+//           PValue = PValue + TM[threadIdx.y][8] * TN[8][threadIdx.x];
+//           PValue = PValue + TM[threadIdx.y][9] * TN[9][threadIdx.x];
+//           PValue = PValue + TM[threadIdx.y][10] * TN[10][threadIdx.x];
+//           PValue = PValue + TM[threadIdx.y][11] * TN[11][threadIdx.x];
+//           PValue = PValue + TM[threadIdx.y][12] * TN[12][threadIdx.x];
+//           PValue = PValue + TM[threadIdx.y][13] * TN[13][threadIdx.x];
+//           PValue = PValue + TM[threadIdx.y][14] * TN[14][threadIdx.x];
+//           PValue = PValue + TM[threadIdx.y][15] * TN[15][threadIdx.x];
+//
+//        __syncthreads();
+//        }
+//     if((Row < numARows) && (Col<numBColumns)){
+//      y3d(tb,Row,Col) = PValue;
+//     }
+//   }
+//   #undef x4d
+//   #undef y3d
+//   #undef filter3d
+// }
+
+__global__ void forward_conv_kernel(float *Y, const float *X,const float *k, const int B, const int M, const int C, const int H, const int W, const int K, int W_grid)
 {
-
-  __shared__ float TM[16][16];
-  __shared__ float TN[16][16];
-  const int UNROLLWIDTH = (H - K + 1) * (W - K + 1);
-
-  int Row = blockIdx.y * blockDim.y + threadIdx.y ;
-  int Col = blockIdx.x * blockDim.x + threadIdx.x ;
-  int tb = blockIdx.z * blockDim.z + threadIdx.z ;
-
-  int numARows = M;
-  int numBColumns = UNROLLWIDTH;
-  int numAColumns = K * K * C;
-
-
-  float PValue = 0;
-  if (tb < B) {
-    for( int i = 0; i< ceil(numAColumns/16.0); i++)
+  const int H_out = H - K + 1;
+  const int W_out = W - K + 1;
+  int X_tile_width = TILE_WIDTH + K - 1;
+  extern __shared__ float shmem[];
+  float* X_shared = &shmem[0];
+  float* W_shared = &shmem[X_tile_width * X_tile_width];
+  int n = blockIdx.x;
+  int m = blockIdx.y;
+  int h0 = threadIdx.y;
+  int w0 = threadIdx.x;
+  int h_base = (blockIdx.z/W_grid)*TILE_WIDTH;
+  int w_base = (blockIdx.z%W_grid)*TILE_WIDTH;
+  int h = h_base + h0;
+  int w = w_base + w0;
+  float acc = 0.0f;
+  for(int c = 0; c < C; c++)
+  {
+    if(h0 < K && w0 < K)
     {
-        if((Row < numARows) && ((i*16 + threadIdx.x) < numAColumns ) ) {
-          TM[threadIdx.y][threadIdx.x] = k[Row * numAColumns+ i *16 +threadIdx.x];
-        }
-        else{
-          TM[threadIdx.y][threadIdx.x] = 0;
-        }
-
-        if(( (i*16+threadIdx.y) < numAColumns )  && (Col < numBColumns) ){
-          // row::threadIdx.x   col::threadIdx.y
-          TN[threadIdx.y][threadIdx.x] = x[(tb) * (C * H * W) + \
-          ((i*16+threadIdx.y)/(K*K)) * (H * W) + \
-          ((((i*16+threadIdx.y)%(K*K))/K)+(Col/(W-K+1)))*(W) + \
-          (((i*16+threadIdx.y)%K)+(Col%(W-K+1)))];
-        }
-        else{
-         TN[threadIdx.y][threadIdx.x] = 0 ;
-        }
-
-       __syncthreads();
-
-          PValue = PValue + TM[threadIdx.y][0] * TN[0][threadIdx.x];
-          PValue = PValue + TM[threadIdx.y][1] * TN[1][threadIdx.x];
-          PValue = PValue + TM[threadIdx.y][2] * TN[2][threadIdx.x];
-          PValue = PValue + TM[threadIdx.y][3] * TN[3][threadIdx.x];
-          PValue = PValue + TM[threadIdx.y][4] * TN[4][threadIdx.x];
-          PValue = PValue + TM[threadIdx.y][5] * TN[5][threadIdx.x];
-          PValue = PValue + TM[threadIdx.y][6] * TN[6][threadIdx.x];
-          PValue = PValue + TM[threadIdx.y][7] * TN[7][threadIdx.x];
-          PValue = PValue + TM[threadIdx.y][8] * TN[8][threadIdx.x];
-          PValue = PValue + TM[threadIdx.y][9] * TN[9][threadIdx.x];
-          PValue = PValue + TM[threadIdx.y][10] * TN[10][threadIdx.x];
-          PValue = PValue + TM[threadIdx.y][11] * TN[11][threadIdx.x];
-          PValue = PValue + TM[threadIdx.y][12] * TN[12][threadIdx.x];
-          PValue = PValue + TM[threadIdx.y][13] * TN[13][threadIdx.x];
-          PValue = PValue + TM[threadIdx.y][14] * TN[14][threadIdx.x];
-          PValue = PValue + TM[threadIdx.y][15] * TN[15][threadIdx.x];
-
-       __syncthreads();
-       }
-    if((Row < numARows) && (Col<numBColumns)){
-     y[(tb) * (M * UNROLLWIDTH) + Row*numBColumns + Col] = PValue;
+      W_shared[h0 * K + w0] = k[m * C*K*K + c *K*K + h0 *K + w0];
     }
+    __syncthreads();
+    for(int i = h; i < h_base + X_tile_width; i+=TILE_WIDTH) {
+      for(int j = w; j < w_base + X_tile_width; j+=TILE_WIDTH) {
+        if(i < H && j < W)
+          X_shared[(i-h_base)*X_tile_width + j - w_base] = X[n*C*H*W + c*H*W+ i*W + j];
+        else
+          X_shared[(i-h_base)*X_tile_width + j - w_base] = 0.0;
+      }
+    }
+    __syncthreads();
+    for(int p =0; p < K; p++) {
+        for(int q = 0; q < K; q++) {
+            acc += X_shared[(h0 + p) * X_tile_width + w0 + q] * W_shared[p * K + q];
+        }
+    }
+    __syncthreads();
+  }
+  if(h < H_out && w < W_out) {
+    Y[n*M*H_out*W_out + m*H_out*W_out + h * W_out + w] = acc;
   }
 }
-
 
 /*
    This function is called by new-inl.h
@@ -236,7 +287,6 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     int NUM_THREADS = 16;
     int NUM_BATCH = 16;
     int NUM_BATCH_ = 1;
-    int TILE_WIDTH = 16;
     // if (H == 30) {
     //   TILE_WIDTH = 30;
     // }
@@ -257,10 +307,14 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     // Extract the tensor dimensions into B,M,C,H,W,K
     // ...
     // Set the kernel dimensions
-    int H_grid = ceil(M*1.0/float(TILE_WIDTH));
-    int W_grid = ceil(UNROLLWIDTH*1.0/float(TILE_WIDTH));
-    int B_grid = ceil(B*1.0/NUM_BATCH_);
-    dim3 gridDim(W_grid,H_grid,B_grid);
+    // int H_grid = ceil(M*1.0/float(TILE_WIDTH));
+    // int W_grid = ceil(UNROLLWIDTH*1.0/float(TILE_WIDTH));
+    int W_grid = ceil(W_out/(TILE_WIDTH*1.0));
+    int H_grid = ceil(H_out/(TILE_WIDTH*1.0));
+    int Z = H_grid * W_grid;
+
+
+    dim3 gridDim(B,M,Z);
     dim3 blockDim(TILE_WIDTH, TILE_WIDTH, NUM_BATCH_);
 
     printf("B:%d\n", B);
@@ -269,12 +323,12 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     printf("H:%d\n", H);
     printf("W:%d\n", W);
     printf("K:%d\n", K);
-
+    size_t s = sizeof(float) * ((TILE_WIDTH+K-1) * (TILE_WIDTH+K-1));
     // int s = sizeof(float) * ((TILE_WIDTH + K-1)*(TILE_WIDTH + K-1) + K*K );
     // Call the kernel
     //forward_kernel<<<gridDim, blockDim>>>(y.dptr_,unrolled,w.dptr_, B,M,C,H,W,K);
     // shared_forward_kernel<<<gridDim, blockDim>>>(y.dptr_,unrolled,w.dptr_, B,M,C,H,W,K);
-    fuse_forward_kernel<<<gridDim, blockDim>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K);
+    forward_conv_kernel<<<gridDim, blockDim,s>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K,W_grid);
 
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());
