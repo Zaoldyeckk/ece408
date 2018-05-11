@@ -237,7 +237,7 @@ __global__ void fuse_forward_kernel(float *y, const float *x, const float *k, co
   #undef HW
 }
 
-__global__ void forward_conv_kernel(float *Y, const float * X)
+__global__ void forward_conv_kernel(float *  Y, const float * X)
 {
   #define H_out 60
   #define W_out 60
@@ -395,7 +395,7 @@ __global__ void forward_conv_kernel(float *Y, const float * X)
     #undef K
     #undef W_grid
 }
-__global__ void forward_conv30_kernel(float *Y, const float *X)
+__global__ void forward_conv30_kernel(float * Y, const float *X)
 {
   #define H_out 26
   #define W_out 26
@@ -1098,9 +1098,11 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     // shared_forward_kernel<<<gridDim, blockDim>>>(y.dptr_,unrolled,w.dptr_, B,M,C,H,W,K);
     if (H == 30) {
       // fuse_forward_kernel<<<mmgridDim, mmblockDim>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K);
+      cudaDeviceSetSharedMemConfig(cudaSharedMemBankSizeEightByte);
       forward_conv30_kernel<<<gridDim30, blockDim30,s30>>>(y.dptr_,x.dptr_);
     }
     else{
+      cudaDeviceSetSharedMemConfig(cudaSharedMemBankSizeEightByte);
       forward_conv_kernel<<<gridDim64, blockDim64,s>>>(y.dptr_,x.dptr_);
     }
 
