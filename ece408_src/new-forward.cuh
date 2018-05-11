@@ -4,6 +4,7 @@
 
 #include <mxnet/base.h>
 #define TILE_WIDTH 16
+#define TILE_WIDTH30 30
 
 namespace mxnet
 {
@@ -147,82 +148,247 @@ namespace op
 // }
 
 
-// __global__ void fuse_forward_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
-// {
-//
-//   __shared__ float TM[16][16];
-//   __shared__ float TN[16][16];
-//   const int UNROLLWIDTH = (H - K + 1) * (W - K + 1);
-//
-//   int Row = blockIdx.y * blockDim.y + threadIdx.y ;
-//   int Col = blockIdx.x * blockDim.x + threadIdx.x ;
-//   int tb = blockIdx.z * blockDim.z + threadIdx.z ;
-//
-//   int numARows = M;
-//   int numBColumns = UNROLLWIDTH;
-//   int numAColumns = K * K * C;
-//
-//   #define x4d(tb, i, Col, y) x[(tb) * (C * H * W) + \
-//                                   ((i*16+y)/(K*K)) * (H * W) + \
-//                                   ((((i*16+y)%(K*K))/K)+(Col/(W-K+1)))*(W) + \
-//                                   (((i*16+y)%K)+(Col%(W-K+1)))]
-//   #define filter3d(Row,i,x) k[Row * numAColumns+ i *16 +x]
-//   #define y3d(tb,Row,Col)  y[(tb) * (M * UNROLLWIDTH) + Row*numBColumns + Col]
-//
-//   float PValue = 0;
-//   if (tb < B) {
-//     for( int i = 0; i< ceil(numAColumns/16.0); i++)
-//     {
-//         if((Row < numARows) && ((i*16 + threadIdx.x) < numAColumns ) ) {
-//           TM[threadIdx.y][threadIdx.x] = filter3d(Row,i,threadIdx.x);
-//         }
-//         else{
-//           TM[threadIdx.y][threadIdx.x] = 0;
-//         }
-//
-//         if(( (i*16+threadIdx.y) < numAColumns )  && (Col < numBColumns) ){
-//           // row::threadIdx.x   col::threadIdx.y
-//           TN[threadIdx.y][threadIdx.x] = x4d(tb,i,Col,threadIdx.y);
-//         }
-//         else{
-//          TN[threadIdx.y][threadIdx.x] = 0 ;
-//         }
-//
-//        __syncthreads();
-//
-//           PValue = PValue + TM[threadIdx.y][0] * TN[0][threadIdx.x];
-//           PValue = PValue + TM[threadIdx.y][1] * TN[1][threadIdx.x];
-//           PValue = PValue + TM[threadIdx.y][2] * TN[2][threadIdx.x];
-//           PValue = PValue + TM[threadIdx.y][3] * TN[3][threadIdx.x];
-//           PValue = PValue + TM[threadIdx.y][4] * TN[4][threadIdx.x];
-//           PValue = PValue + TM[threadIdx.y][5] * TN[5][threadIdx.x];
-//           PValue = PValue + TM[threadIdx.y][6] * TN[6][threadIdx.x];
-//           PValue = PValue + TM[threadIdx.y][7] * TN[7][threadIdx.x];
-//           PValue = PValue + TM[threadIdx.y][8] * TN[8][threadIdx.x];
-//           PValue = PValue + TM[threadIdx.y][9] * TN[9][threadIdx.x];
-//           PValue = PValue + TM[threadIdx.y][10] * TN[10][threadIdx.x];
-//           PValue = PValue + TM[threadIdx.y][11] * TN[11][threadIdx.x];
-//           PValue = PValue + TM[threadIdx.y][12] * TN[12][threadIdx.x];
-//           PValue = PValue + TM[threadIdx.y][13] * TN[13][threadIdx.x];
-//           PValue = PValue + TM[threadIdx.y][14] * TN[14][threadIdx.x];
-//           PValue = PValue + TM[threadIdx.y][15] * TN[15][threadIdx.x];
-//
-//        __syncthreads();
-//        }
-//     if((Row < numARows) && (Col<numBColumns)){
-//      y3d(tb,Row,Col) = PValue;
-//     }
-//   }
-//   #undef x4d
-//   #undef y3d
-//   #undef filter3d
-// }
+__global__ void fuse_forward_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
+{
+  #define UNROLLWIDTH 676
+  #define numARows 16
+  #define numBColumns 676
+  #define numAColumns 150
+  #define CHW 5400
+  #define KK 25
+  #define HW 900
+  __shared__ float TM[16][16];
+  __shared__ float TN[16][16];
+  // const int UNROLLWIDTH = (H - K + 1) * (W - K + 1);
+
+  int Row = blockIdx.y * blockDim.y + threadIdx.y ;
+  int Col = blockIdx.x * blockDim.x + threadIdx.x ;
+  int tb = blockIdx.z * blockDim.z + threadIdx.z ;
+
+  // int numARows = M;
+  // int numBColumns = UNROLLWIDTH;
+  // int numAColumns = K * K * C;
+
+  #define x4d(tb, i, Col, y) x[(tb) * (CHW) + \
+                                  ((i*16+y)/(KK)) * (HW) + \
+                                  ((((i*16+y)%(KK))/K)+(Col/(W-K+1)))*(W) + \
+                                  (((i*16+y)%K)+(Col%(W-K+1)))]
+  #define filter3d(Row,i,x) k[Row * numAColumns+ i *16 +x]
+  #define y3d(tb,Row,Col)  y[(tb) * (M * UNROLLWIDTH) + Row*numBColumns + Col]
+
+  float PValue = 0;
+  if (tb < B) {
+    for( int i = 0; i< ceil(numAColumns/16.0); i++)
+    {
+        if((Row < numARows) && ((i*16 + threadIdx.x) < numAColumns ) ) {
+          TM[threadIdx.y][threadIdx.x] = filter3d(Row,i,threadIdx.x);
+        }
+        else{
+          TM[threadIdx.y][threadIdx.x] = 0;
+        }
+
+        if(( (i*16+threadIdx.y) < numAColumns )  && (Col < numBColumns) ){
+          // row::threadIdx.x   col::threadIdx.y
+          TN[threadIdx.y][threadIdx.x] = x4d(tb,i,Col,threadIdx.y);
+        }
+        else{
+         TN[threadIdx.y][threadIdx.x] = 0 ;
+        }
+
+       __syncthreads();
+        // for(int kk = 0; kk <16 ; kk++){
+        //    PValue = PValue + TM[threadIdx.y][kk] * TN[kk][threadIdx.x];
+        // }
+          PValue = PValue + TM[threadIdx.y][0] * TN[0][threadIdx.x];
+          PValue = PValue + TM[threadIdx.y][1] * TN[1][threadIdx.x];
+          PValue = PValue + TM[threadIdx.y][2] * TN[2][threadIdx.x];
+          PValue = PValue + TM[threadIdx.y][3] * TN[3][threadIdx.x];
+          PValue = PValue + TM[threadIdx.y][4] * TN[4][threadIdx.x];
+          PValue = PValue + TM[threadIdx.y][5] * TN[5][threadIdx.x];
+          PValue = PValue + TM[threadIdx.y][6] * TN[6][threadIdx.x];
+          PValue = PValue + TM[threadIdx.y][7] * TN[7][threadIdx.x];
+          PValue = PValue + TM[threadIdx.y][8] * TN[8][threadIdx.x];
+          PValue = PValue + TM[threadIdx.y][9] * TN[9][threadIdx.x];
+          PValue = PValue + TM[threadIdx.y][10] * TN[10][threadIdx.x];
+          PValue = PValue + TM[threadIdx.y][11] * TN[11][threadIdx.x];
+          PValue = PValue + TM[threadIdx.y][12] * TN[12][threadIdx.x];
+          PValue = PValue + TM[threadIdx.y][13] * TN[13][threadIdx.x];
+          PValue = PValue + TM[threadIdx.y][14] * TN[14][threadIdx.x];
+          PValue = PValue + TM[threadIdx.y][15] * TN[15][threadIdx.x];
+
+       __syncthreads();
+       }
+    if((Row < numARows) && (Col<numBColumns)){
+     y3d(tb,Row,Col) = PValue;
+    }
+  }
+  #undef x4d
+  #undef y3d
+  #undef filter3d
+  #undef UNROLLWIDTH
+  #undef numARows
+  #undef numBColumns
+  #undef numAColumns
+  #undef CHW
+  #undef KK
+  #undef HW
+}
 
 __global__ void forward_conv_kernel(float *Y, const float *X,const float *k, const int B, const int M, const int C, const int H, const int W, const int K, int W_grid)
 {
-  const int H_out = H - K + 1;
-  const int W_out = W - K + 1;
-  int X_tile_width = TILE_WIDTH + K - 1;
+  #define H_out 60
+  #define W_out 60
+  #define X_tile_width 20
+  #define h_base  ((blockIdx.z/W_grid)*TILE_WIDTH)
+  #define w_base  ((blockIdx.z%W_grid)*TILE_WIDTH)
+  #define xtilearea 400
+  #define sharedaccess (threadIdx.y * 5 + threadIdx.x)
+  #define filteraccess  (blockIdx.y * 25 + threadIdx.y * 5 +threadIdx.x)
+  #define Yaccess (blockIdx.x*21600 + blockIdx.y*3600 + (h_base+threadIdx.y) * 60 + w_base + threadIdx.x)
+  #define CHW 4096
+  #define HW 4096
+  #define MHOWO 21600
+  #define HOWO 3600
+  #define CKK 25
+  // const int H_out = H - K + 1;
+  // const int W_out = W - K + 1;
+  // int X_tile_width = TILE_WIDTH + K -1
+  extern __shared__ float shmem[];
+  float* X_shared = &shmem[0];
+  float* W_shared = &shmem[xtilearea];
+  int n = blockIdx.x;
+  int m = blockIdx.y;
+  int h0 = threadIdx.y;
+  int w0 = threadIdx.x;
+  // int h_base = (blockIdx.z/W_grid)*TILE_WIDTH;
+  // int w_base = (blockIdx.z%W_grid)*TILE_WIDTH;
+  int h = h_base + h0;
+  int w = w_base + w0;
+  float acc = 0.0f;
+  int c = 0;
+    if(h0 < K && w0 < K)
+    {
+      W_shared[sharedaccess] = k[filteraccess];
+    }
+    __syncthreads();
+    for(int i = h; i < h_base + X_tile_width; i+=TILE_WIDTH) {
+      for(int j = w; j < w_base + X_tile_width; j+=TILE_WIDTH) {
+        if(i < H && j < W)
+          X_shared[(i-h_base)*X_tile_width + j - w_base] = X[n*CHW + c*HW+ i*W + j];
+        else
+          X_shared[(i-h_base)*X_tile_width + j - w_base] = 0.0;
+      }
+    }
+      // if (i<H) {
+      //   X_shared[(i-h_base)*X_tile_width + w - w_base] = X[n*C*H*W + c*H*W+ i*W + w];
+      // }
+      // else{
+      //   X_shared[(i-h_base)*X_tile_width + w - w_base] = 0.0;
+      // }
+      // if ((w+16) <(w_base + X_tile_width)) {
+      //   if (i<H ) {
+      //     X_shared[(i-h_base)*X_tile_width + w +16 - w_base] = X[n*C*H*W + c*H*W+ i*W + w+16];
+      //   }
+      //   else{
+      //     X_shared[(i-h_base)*X_tile_width + w +16- w_base] = 0.0;
+      //   }
+      // }
+
+    //   if (h < H && w < W) {
+    //     X_shared[(h-h_base)*X_tile_width + w - w_base] = X[n*C*H*W + c*H*W+ h*W + w];
+    //   }
+    //   else{
+    //     X_shared[(h-h_base)*X_tile_width + w - w_base] = 0.0;
+    //   }
+    //   if ((w+16) <(w_base + X_tile_width)) {
+    //     if (h <H && (w+16<W)) {
+    //       X_shared[(h-h_base)*X_tile_width + w +16 - w_base] = X[n*C*H*W + c*H*W+ h*W + w+16];
+    //     }
+    //     else{
+    //       X_shared[(h-h_base)*X_tile_width + w +16- w_base] = 0.0;
+    //     }
+    // }
+    // if ((h + 16) < (h_base + X_tile_width)) {
+    //   if ((h+16) <H && w < W) {
+    //     X_shared[(h+16-h_base)*X_tile_width + w - w_base] = X[n*C*H*W + c*H*W+ (h+16)*W + w];
+    //   }
+    //   else{
+    //     X_shared[(h+16-h_base)*X_tile_width + w - w_base] = 0.0;
+    //   }
+    //   if ((w+16) <(w_base + X_tile_width)) {
+    //     if ((h+16) <H && (w+16<W)) {
+    //       X_shared[(h+16-h_base)*X_tile_width + w +16 - w_base] = X[n*C*H*W + c*H*W+ (h+16)*W + w+16];
+    //     }
+    //     else{
+    //       X_shared[(h+16-h_base)*X_tile_width + w +16- w_base] = 0.0;
+    //     }
+    // }
+  // }
+    __syncthreads();
+    // for(int p =0; p < K; p++) {
+    //     for(int q = 0; q < K; q++) {
+    //         acc += X_shared[(h0 + p) * X_tile_width + w0 + q] * W_shared[p * K + q];
+    //     }
+    // }
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 0] * W_shared[0 * K + 0];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 1] * W_shared[0 * K + 1];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 2] * W_shared[0 * K + 2];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 3] * W_shared[0 * K + 3];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 4] * W_shared[0 * K + 4];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 0] * W_shared[1 * K + 0];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 1] * W_shared[1 * K + 1];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 2] * W_shared[1 * K + 2];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 3] * W_shared[1 * K + 3];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 4] * W_shared[1 * K + 4];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 0] * W_shared[2 * K + 0];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 1] * W_shared[2 * K + 1];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 2] * W_shared[2 * K + 2];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 3] * W_shared[2 * K + 3];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 4] * W_shared[2 * K + 4];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 0] * W_shared[3 * K + 0];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 1] * W_shared[3 * K + 1];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 2] * W_shared[3 * K + 2];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 3] * W_shared[3 * K + 3];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 4] * W_shared[3 * K + 4];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 0] * W_shared[4 * K + 0];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 1] * W_shared[4 * K + 1];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 2] * W_shared[4 * K + 2];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 3] * W_shared[4 * K + 3];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 4] * W_shared[4 * K + 4];
+
+    __syncthreads();
+  if(h < H_out && w < W_out) {
+     Y[Yaccess] = acc;
+
+  }
+    #undef W_out
+    #undef H_out
+    #undef X_tile_width
+    #undef h_base
+    #undef w_base
+    #undef xtilearea
+    #undef sharedaccess
+    #undef filteraccess
+    #undef Yaccess
+    #undef CHW
+    #undef HW
+    #undef MHOWO
+    #undef HOWO
+    #undef CKK
+}
+__global__ void forward_conv30_kernel(float *Y, const float *X,const float *k, const int B, const int M, const int C, const int H, const int W, const int K, int W_grid)
+{
+  #define H_out 26
+  #define W_out 26
+  #define X_tile_width 30
+  #define h_base  ((blockIdx.z/W_grid)*TILE_WIDTH30)
+  #define w_base  ((blockIdx.z%W_grid)*TILE_WIDTH30)
+  #define sharedaccess (threadIdx.y * 5 + threadIdx.x)
+  #define filteraccess  (blockIdx.y * 25 + threadIdx.y * 5 +threadIdx.x)
+  #define Yaccess (blockIdx.x*10816 + blockIdx.y*676 + (h_base+threadIdx.y) * 26 + w_base + threadIdx.x)
+  // const int H_out = H - K + 1;
+  // const int W_out = W - K + 1;
+  // int X_tile_width = TILE_WIDTH30 + K - 1;
   extern __shared__ float shmem[];
   float* X_shared = &shmem[0];
   float* W_shared = &shmem[X_tile_width * X_tile_width];
@@ -230,37 +396,312 @@ __global__ void forward_conv_kernel(float *Y, const float *X,const float *k, con
   int m = blockIdx.y;
   int h0 = threadIdx.y;
   int w0 = threadIdx.x;
-  int h_base = (blockIdx.z/W_grid)*TILE_WIDTH;
-  int w_base = (blockIdx.z%W_grid)*TILE_WIDTH;
+  // int h_base = (blockIdx.z/W_grid)*TILE_WIDTH30;
+  // int w_base = (blockIdx.z%W_grid)*TILE_WIDTH30;
   int h = h_base + h0;
   int w = w_base + w0;
   float acc = 0.0f;
-  for(int c = 0; c < C; c++)
-  {
+  // for(int c = 0; c < C; c++)
+  // {
     if(h0 < K && w0 < K)
     {
-      W_shared[h0 * K + w0] = k[m * C*K*K + c *K*K + h0 *K + w0];
+      W_shared[sharedaccess] = k[m * C*K*K + 0 *K*K + h0 *K + w0];
     }
     __syncthreads();
-    for(int i = h; i < h_base + X_tile_width; i+=TILE_WIDTH) {
-      for(int j = w; j < w_base + X_tile_width; j+=TILE_WIDTH) {
+    for(int i = h; i < h_base + X_tile_width; i+=TILE_WIDTH30) {
+      for(int j = w; j < w_base + X_tile_width; j+=TILE_WIDTH30) {
         if(i < H && j < W)
-          X_shared[(i-h_base)*X_tile_width + j - w_base] = X[n*C*H*W + c*H*W+ i*W + j];
+          X_shared[(i-h_base)*X_tile_width + j - w_base] = X[n*C*H*W + 0*H*W+ i*W + j];
         else
           X_shared[(i-h_base)*X_tile_width + j - w_base] = 0.0;
       }
+      // if (i<H) {
+      //   X_shared[(i-h_base)*X_tile_width + w - w_base] = X[n*C*H*W + c*H*W+ i*W + w];
+      // }
+      // else{
+      //   X_shared[(i-h_base)*X_tile_width + w - w_base] = 0.0;
+      // }
+
     }
     __syncthreads();
-    for(int p =0; p < K; p++) {
-        for(int q = 0; q < K; q++) {
-            acc += X_shared[(h0 + p) * X_tile_width + w0 + q] * W_shared[p * K + q];
-        }
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 0] * W_shared[0 * K + 0];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 1] * W_shared[0 * K + 1];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 2] * W_shared[0 * K + 2];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 3] * W_shared[0 * K + 3];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 4] * W_shared[0 * K + 4];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 0] * W_shared[1 * K + 0];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 1] * W_shared[1 * K + 1];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 2] * W_shared[1 * K + 2];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 3] * W_shared[1 * K + 3];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 4] * W_shared[1 * K + 4];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 0] * W_shared[2 * K + 0];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 1] * W_shared[2 * K + 1];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 2] * W_shared[2 * K + 2];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 3] * W_shared[2 * K + 3];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 4] * W_shared[2 * K + 4];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 0] * W_shared[3 * K + 0];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 1] * W_shared[3 * K + 1];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 2] * W_shared[3 * K + 2];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 3] * W_shared[3 * K + 3];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 4] * W_shared[3 * K + 4];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 0] * W_shared[4 * K + 0];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 1] * W_shared[4 * K + 1];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 2] * W_shared[4 * K + 2];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 3] * W_shared[4 * K + 3];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 4] * W_shared[4 * K + 4];
+    __syncthreads();
+
+
+    if(h0 < K && w0 < K)
+    {
+      W_shared[sharedaccess] = k[m * C*K*K + 1 *K*K + h0 *K + w0];
     }
     __syncthreads();
-  }
+    for(int i = h; i < h_base + X_tile_width; i+=TILE_WIDTH30) {
+      for(int j = w; j < w_base + X_tile_width; j+=TILE_WIDTH30) {
+        if(i < H && j < W)
+          X_shared[(i-h_base)*X_tile_width + j - w_base] = X[n*C*H*W + 1*H*W+ i*W + j];
+        else
+          X_shared[(i-h_base)*X_tile_width + j - w_base] = 0.0;
+      }
+      // if (i<H) {
+      //   X_shared[(i-h_base)*X_tile_width + w - w_base] = X[n*C*H*W + c*H*W+ i*W + w];
+      // }
+      // else{
+      //   X_shared[(i-h_base)*X_tile_width + w - w_base] = 0.0;
+      // }
+
+    }
+    __syncthreads();
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 0] * W_shared[0 * K + 0];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 1] * W_shared[0 * K + 1];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 2] * W_shared[0 * K + 2];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 3] * W_shared[0 * K + 3];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 4] * W_shared[0 * K + 4];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 0] * W_shared[1 * K + 0];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 1] * W_shared[1 * K + 1];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 2] * W_shared[1 * K + 2];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 3] * W_shared[1 * K + 3];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 4] * W_shared[1 * K + 4];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 0] * W_shared[2 * K + 0];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 1] * W_shared[2 * K + 1];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 2] * W_shared[2 * K + 2];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 3] * W_shared[2 * K + 3];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 4] * W_shared[2 * K + 4];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 0] * W_shared[3 * K + 0];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 1] * W_shared[3 * K + 1];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 2] * W_shared[3 * K + 2];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 3] * W_shared[3 * K + 3];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 4] * W_shared[3 * K + 4];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 0] * W_shared[4 * K + 0];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 1] * W_shared[4 * K + 1];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 2] * W_shared[4 * K + 2];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 3] * W_shared[4 * K + 3];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 4] * W_shared[4 * K + 4];
+    __syncthreads();
+
+
+    if(h0 < K && w0 < K)
+    {
+      W_shared[sharedaccess] = k[m * C*K*K + 2 *K*K + h0 *K + w0];
+    }
+    __syncthreads();
+    for(int i = h; i < h_base + X_tile_width; i+=TILE_WIDTH30) {
+      for(int j = w; j < w_base + X_tile_width; j+=TILE_WIDTH30) {
+        if(i < H && j < W)
+          X_shared[(i-h_base)*X_tile_width + j - w_base] = X[n*C*H*W + 2*H*W+ i*W + j];
+        else
+          X_shared[(i-h_base)*X_tile_width + j - w_base] = 0.0;
+      }
+      // if (i<H) {
+      //   X_shared[(i-h_base)*X_tile_width + w - w_base] = X[n*C*H*W + c*H*W+ i*W + w];
+      // }
+      // else{
+      //   X_shared[(i-h_base)*X_tile_width + w - w_base] = 0.0;
+      // }
+
+    }
+    __syncthreads();
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 0] * W_shared[0 * K + 0];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 1] * W_shared[0 * K + 1];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 2] * W_shared[0 * K + 2];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 3] * W_shared[0 * K + 3];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 4] * W_shared[0 * K + 4];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 0] * W_shared[1 * K + 0];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 1] * W_shared[1 * K + 1];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 2] * W_shared[1 * K + 2];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 3] * W_shared[1 * K + 3];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 4] * W_shared[1 * K + 4];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 0] * W_shared[2 * K + 0];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 1] * W_shared[2 * K + 1];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 2] * W_shared[2 * K + 2];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 3] * W_shared[2 * K + 3];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 4] * W_shared[2 * K + 4];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 0] * W_shared[3 * K + 0];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 1] * W_shared[3 * K + 1];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 2] * W_shared[3 * K + 2];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 3] * W_shared[3 * K + 3];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 4] * W_shared[3 * K + 4];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 0] * W_shared[4 * K + 0];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 1] * W_shared[4 * K + 1];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 2] * W_shared[4 * K + 2];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 3] * W_shared[4 * K + 3];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 4] * W_shared[4 * K + 4];
+    __syncthreads();
+
+    if(h0 < K && w0 < K)
+    {
+      W_shared[sharedaccess] = k[m * C*K*K + 3 *K*K + h0 *K + w0];
+    }
+    __syncthreads();
+    for(int i = h; i < h_base + X_tile_width; i+=TILE_WIDTH30) {
+      for(int j = w; j < w_base + X_tile_width; j+=TILE_WIDTH30) {
+        if(i < H && j < W)
+          X_shared[(i-h_base)*X_tile_width + j - w_base] = X[n*C*H*W + 3*H*W+ i*W + j];
+        else
+          X_shared[(i-h_base)*X_tile_width + j - w_base] = 0.0;
+      }
+      // if (i<H) {
+      //   X_shared[(i-h_base)*X_tile_width + w - w_base] = X[n*C*H*W + c*H*W+ i*W + w];
+      // }
+      // else{
+      //   X_shared[(i-h_base)*X_tile_width + w - w_base] = 0.0;
+      // }
+
+    }
+    __syncthreads();
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 0] * W_shared[0 * K + 0];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 1] * W_shared[0 * K + 1];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 2] * W_shared[0 * K + 2];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 3] * W_shared[0 * K + 3];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 4] * W_shared[0 * K + 4];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 0] * W_shared[1 * K + 0];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 1] * W_shared[1 * K + 1];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 2] * W_shared[1 * K + 2];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 3] * W_shared[1 * K + 3];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 4] * W_shared[1 * K + 4];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 0] * W_shared[2 * K + 0];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 1] * W_shared[2 * K + 1];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 2] * W_shared[2 * K + 2];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 3] * W_shared[2 * K + 3];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 4] * W_shared[2 * K + 4];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 0] * W_shared[3 * K + 0];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 1] * W_shared[3 * K + 1];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 2] * W_shared[3 * K + 2];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 3] * W_shared[3 * K + 3];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 4] * W_shared[3 * K + 4];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 0] * W_shared[4 * K + 0];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 1] * W_shared[4 * K + 1];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 2] * W_shared[4 * K + 2];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 3] * W_shared[4 * K + 3];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 4] * W_shared[4 * K + 4];
+    __syncthreads();
+
+    if(h0 < K && w0 < K)
+    {
+      W_shared[sharedaccess] = k[m * C*K*K + 4 *K*K + h0 *K + w0];
+    }
+    __syncthreads();
+    for(int i = h; i < h_base + X_tile_width; i+=TILE_WIDTH30) {
+      for(int j = w; j < w_base + X_tile_width; j+=TILE_WIDTH30) {
+        if(i < H && j < W)
+          X_shared[(i-h_base)*X_tile_width + j - w_base] = X[n*C*H*W + 4*H*W+ i*W + j];
+        else
+          X_shared[(i-h_base)*X_tile_width + j - w_base] = 0.0;
+      }
+      // if (i<H) {
+      //   X_shared[(i-h_base)*X_tile_width + w - w_base] = X[n*C*H*W + c*H*W+ i*W + w];
+      // }
+      // else{
+      //   X_shared[(i-h_base)*X_tile_width + w - w_base] = 0.0;
+      // }
+
+    }
+    __syncthreads();
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 0] * W_shared[0 * K + 0];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 1] * W_shared[0 * K + 1];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 2] * W_shared[0 * K + 2];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 3] * W_shared[0 * K + 3];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 4] * W_shared[0 * K + 4];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 0] * W_shared[1 * K + 0];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 1] * W_shared[1 * K + 1];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 2] * W_shared[1 * K + 2];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 3] * W_shared[1 * K + 3];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 4] * W_shared[1 * K + 4];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 0] * W_shared[2 * K + 0];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 1] * W_shared[2 * K + 1];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 2] * W_shared[2 * K + 2];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 3] * W_shared[2 * K + 3];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 4] * W_shared[2 * K + 4];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 0] * W_shared[3 * K + 0];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 1] * W_shared[3 * K + 1];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 2] * W_shared[3 * K + 2];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 3] * W_shared[3 * K + 3];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 4] * W_shared[3 * K + 4];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 0] * W_shared[4 * K + 0];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 1] * W_shared[4 * K + 1];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 2] * W_shared[4 * K + 2];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 3] * W_shared[4 * K + 3];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 4] * W_shared[4 * K + 4];
+    __syncthreads();
+
+    if(h0 < K && w0 < K)
+    {
+      W_shared[sharedaccess] = k[m * C*K*K + 5 *K*K + h0 *K + w0];
+    }
+    __syncthreads();
+    for(int i = h; i < h_base + X_tile_width; i+=TILE_WIDTH30) {
+      for(int j = w; j < w_base + X_tile_width; j+=TILE_WIDTH30) {
+        if(i < H && j < W)
+          X_shared[(i-h_base)*X_tile_width + j - w_base] = X[n*C*H*W + 5*H*W+ i*W + j];
+        else
+          X_shared[(i-h_base)*X_tile_width + j - w_base] = 0.0;
+      }
+      // if (i<H) {
+      //   X_shared[(i-h_base)*X_tile_width + w - w_base] = X[n*C*H*W + c*H*W+ i*W + w];
+      // }
+      // else{
+      //   X_shared[(i-h_base)*X_tile_width + w - w_base] = 0.0;
+      // }
+
+    }
+    __syncthreads();
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 0] * W_shared[0 * K + 0];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 1] * W_shared[0 * K + 1];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 2] * W_shared[0 * K + 2];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 3] * W_shared[0 * K + 3];
+    acc += X_shared[(h0 + 0) * X_tile_width + w0 + 4] * W_shared[0 * K + 4];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 0] * W_shared[1 * K + 0];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 1] * W_shared[1 * K + 1];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 2] * W_shared[1 * K + 2];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 3] * W_shared[1 * K + 3];
+    acc += X_shared[(h0 + 1) * X_tile_width + w0 + 4] * W_shared[1 * K + 4];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 0] * W_shared[2 * K + 0];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 1] * W_shared[2 * K + 1];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 2] * W_shared[2 * K + 2];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 3] * W_shared[2 * K + 3];
+    acc += X_shared[(h0 + 2) * X_tile_width + w0 + 4] * W_shared[2 * K + 4];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 0] * W_shared[3 * K + 0];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 1] * W_shared[3 * K + 1];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 2] * W_shared[3 * K + 2];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 3] * W_shared[3 * K + 3];
+    acc += X_shared[(h0 + 3) * X_tile_width + w0 + 4] * W_shared[3 * K + 4];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 0] * W_shared[4 * K + 0];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 1] * W_shared[4 * K + 1];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 2] * W_shared[4 * K + 2];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 3] * W_shared[4 * K + 3];
+    acc += X_shared[(h0 + 4) * X_tile_width + w0 + 4] * W_shared[4 * K + 4];
+    __syncthreads();
+  // }
+  //
   if(h < H_out && w < W_out) {
-    Y[n*M*H_out*W_out + m*H_out*W_out + h * W_out + w] = acc;
+    Y[Yaccess] = acc;
   }
+  #undef W_out
+  #undef H_out
+  #undef X_tile_width
+  #undef h_base
+  #undef w_base
 }
 
 /*
@@ -307,15 +748,22 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     // Extract the tensor dimensions into B,M,C,H,W,K
     // ...
     // Set the kernel dimensions
-    // int H_grid = ceil(M*1.0/float(TILE_WIDTH));
-    // int W_grid = ceil(UNROLLWIDTH*1.0/float(TILE_WIDTH));
+    int mmH_grid = ceil(M*1.0/float(TILE_WIDTH));
+    int mmW_grid = ceil(UNROLLWIDTH*1.0/float(TILE_WIDTH));
+    int mmB_grid = ceil(B*1.0/NUM_BATCH_);
     int W_grid = ceil(W_out/(TILE_WIDTH*1.0));
     int H_grid = ceil(H_out/(TILE_WIDTH*1.0));
     int Z = H_grid * W_grid;
 
+    int W_grid30 = ceil(W_out/(TILE_WIDTH30*1.0));
+    int H_grid30 = ceil(H_out/(TILE_WIDTH30*1.0));
+    int Z30 = H_grid30 * W_grid30;
 
     dim3 gridDim(B,M,Z);
     dim3 blockDim(TILE_WIDTH, TILE_WIDTH, NUM_BATCH_);
+    dim3 mmgridDim(mmW_grid,mmH_grid,mmB_grid);
+    dim3 gridDim30(B,M,Z30);
+    dim3 blockDim30(TILE_WIDTH30,TILE_WIDTH30,NUM_BATCH_);
 
     printf("B:%d\n", B);
     printf("M:%d\n", M);
@@ -324,11 +772,18 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     printf("W:%d\n", W);
     printf("K:%d\n", K);
     size_t s = sizeof(float) * ((TILE_WIDTH+K-1) * (TILE_WIDTH+K-1));
+    size_t s30 = sizeof(float) * ((TILE_WIDTH30+K-1) * (TILE_WIDTH30+K-1));
     // int s = sizeof(float) * ((TILE_WIDTH + K-1)*(TILE_WIDTH + K-1) + K*K );
     // Call the kernel
     //forward_kernel<<<gridDim, blockDim>>>(y.dptr_,unrolled,w.dptr_, B,M,C,H,W,K);
     // shared_forward_kernel<<<gridDim, blockDim>>>(y.dptr_,unrolled,w.dptr_, B,M,C,H,W,K);
-    forward_conv_kernel<<<gridDim, blockDim,s>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K,W_grid);
+    if (H == 30) {
+      fuse_forward_kernel<<<mmgridDim, blockDim>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K);
+      // forward_conv30_kernel<<<gridDim30, blockDim30,s30>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K,W_grid30);
+    }
+    else{
+      forward_conv_kernel<<<gridDim, blockDim,s>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K,W_grid);
+    }
 
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());
